@@ -25,13 +25,12 @@ jobs:
           tar -xf gcc.tar.xz -C toolchains/gcc-14.3 --strip-components=1
           echo "${{ github.workspace }}/toolchains/clang-r383902b/bin" >> "$GITHUB_PATH"
           echo "${{ github.workspace }}/toolchains/gcc-14.3/bin" >> "$GITHUB_PATH"
-      - name: Build
+      - name: Compile watchdog objects
         run: |
           make O=out ARCH=arm64 a3core_eur_open_defconfig
-          sed -i '/yamltree.o/d' scripts/dtc/Makefile
-          sed -i '/dt_to_yaml/d' scripts/dtc/dtc.c
           set -o pipefail
-          make O=out -j"$(nproc)" ARCH="$ARCH" CC="$CC" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" Image 2>&1 | tee watchdog-debug-build.log
+          make O=out -j"$(nproc)" ARCH="$ARCH" CC="$CC" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            drivers/watchdog/sprd_wdt_fiq.o drivers/watchdog/sprd_pmic_wdt.o 2>&1 | tee watchdog-debug-build.log
       - if: always()
         uses: actions/upload-artifact@v4
         with:
