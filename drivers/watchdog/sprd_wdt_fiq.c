@@ -539,7 +539,7 @@ static int sprd_wdt_fiq_syscore_suspend(void)
 	if (wdt_fiq->sleep_en) {
 		if (watchdog_active(&wdt_fiq->wdd)) {
 			sprd_wdt_fiq_load_value(wdt_fiq, SPRD_WDT_SLEEP_TIMEOUT,
-					SPR D_WDT_SLEEP_PRETIMEOUT);
+					SPRD_WDT_SLEEP_PRETIMEOUT);
 		} else {
 			sprd_wdt_fiq_disable(wdt_fiq);
 		}
