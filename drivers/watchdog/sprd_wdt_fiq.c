@@ -74,6 +74,7 @@
 #define SPRD_WDT_SLEEP_TIMEOUT		600
 
 #define SPRD_WDT_SYSCORE_SUSPEND_RESUME
+#define SPRD_WDT_FIQ_DIAG_TAG "[A3DBG][FIQ_WDT]"
 
 struct sprd_wdt_fiq {
 	void __iomem *base;
@@ -112,20 +113,26 @@ static bool sprd_dswdt_fiq_en(void)
 	ret = of_property_read_string(cmdline_node, "bootargs", &cmd_line);
 
 	if (ret) {
-		pr_err("can't parse bootargs property\n");
+		pr_err(SPRD_WDT_FIQ_DIAG_TAG " can't parse bootargs ret=%d\n", ret);
 		return false;
 	}
 
 	dswdten_name_p = strstr(cmd_line, "androidboot.dswdten=");
 	if (!dswdten_name_p) {
-		pr_err("can't find androidboot.dswdten\n");
+		pr_err(SPRD_WDT_FIQ_DIAG_TAG " androidboot.dswdten is absent\n");
 		return false;
 	}
 
 	sscanf(dswdten_name_p, "androidboot.dswdten=%8s", dswdten_value);
-	if (strncmp(dswdten_value, SPRD_DSWDTEN_MAGIC, strlen(SPRD_DSWDTEN_MAGIC)))
+	pr_notice(SPRD_WDT_FIQ_DIAG_TAG " parsed androidboot.dswdten='%s'\n",
+		  dswdten_value);
+	if (strncmp(dswdten_value, SPRD_DSWDTEN_MAGIC,
+		    strlen(SPRD_DSWDTEN_MAGIC))) {
+		pr_notice(SPRD_WDT_FIQ_DIAG_TAG " deep-sleep watchdog disabled\n");
 		return false;
+	}
 
+	pr_notice(SPRD_WDT_FIQ_DIAG_TAG " deep-sleep watchdog enabled\n");
 	return true;
 }
 
@@ -169,8 +176,9 @@ static int sprd_wdt_fiq_load_value(struct sprd_wdt_fiq *wdt, u32 timeout,
 	u32 tmr_step = timeout * SPRD_WDT_FIQ_CNT_STEP;
 	u32 prtmr_step = pretimeout * SPRD_WDT_FIQ_CNT_STEP;
 
-	pr_info("sprd_wdt: sprd wdt load value timeout =%d, pretimeout =%d\n",
-		timeout, pretimeout);
+	pr_notice(SPRD_WDT_FIQ_DIAG_TAG
+		  " load timeout=%u pretimeout=%u active=%d status=0x%lx\n",
+		  timeout, pretimeout, watchdog_active(&wdt->wdd), wdt->wdd.status);
 
 	sprd_wdt_fiq_unlock(wdt);
 	writel_relaxed((tmr_step >> SPRD_WDT_FIQ_CNT_HIGH_SHIFT) &
@@ -197,8 +205,19 @@ static int sprd_wdt_fiq_load_value(struct sprd_wdt_fiq *wdt, u32 timeout,
 		cpu_relax();
 	} while (delay_cnt++ < SPRD_WDT_FIQ_LOAD_TIMEOUT);
 
-	if (delay_cnt >= SPRD_WDT_FIQ_LOAD_TIMEOUT)
+	if (delay_cnt >= SPRD_WDT_FIQ_LOAD_TIMEOUT) {
+		pr_err(SPRD_WDT_FIQ_DIAG_TAG
+		       " load busy timeout raw=0x%08x ctrl=0x%08x\n",
+		       val, readl_relaxed(wdt->base + SPRD_WDT_FIQ_CTRL));
 		return -EBUSY;
+	}
+
+	pr_notice(SPRD_WDT_FIQ_DIAG_TAG
+		  " loaded ctrl=0x%08x raw=0x%08x count=%u (~%us)\n",
+		  readl_relaxed(wdt->base + SPRD_WDT_FIQ_CTRL),
+		  readl_relaxed(wdt->base + SPRD_WDT_FIQ_INT_RAW),
+		  sprd_wdt_fiq_get_cnt_value(wdt),
+		  sprd_wdt_fiq_get_cnt_value(wdt) / SPRD_WDT_FIQ_CNT_STEP);
 	return 0;
 }
 
@@ -221,12 +240,19 @@ static int sprd_wdt_fiq_enable(struct sprd_wdt_fiq *wdt)
 	val |= SPRD_WDT_FIQ_NEW_VER_EN;
 	writel_relaxed(val, wdt->base + SPRD_WDT_FIQ_CTRL);
 	sprd_wdt_fiq_lock(wdt);
+	pr_notice(SPRD_WDT_FIQ_DIAG_TAG " controller enabled ctrl=0x%08x\n", val);
 	return 0;
 }
 
 static void sprd_wdt_fiq_disable(void *_data)
 {
 	struct sprd_wdt_fiq *wdt = _data;
+
+	pr_notice(SPRD_WDT_FIQ_DIAG_TAG
+		  " controller disable ctrl=0x%08x raw=0x%08x count=%u\n",
+		  readl_relaxed(wdt->base + SPRD_WDT_FIQ_CTRL),
+		  readl_relaxed(wdt->base + SPRD_WDT_FIQ_INT_RAW),
+		  sprd_wdt_fiq_get_cnt_value(wdt));
 
 	sprd_wdt_fiq_unlock(wdt);
 	writel_relaxed(0x0, wdt->base + SPRD_WDT_FIQ_CTRL);
@@ -242,22 +268,36 @@ static int sprd_wdt_fiq_start(struct watchdog_device *wdd)
 	u32 val;
 	int ret;
 
+	pr_notice(SPRD_WDT_FIQ_DIAG_TAG
+		  " start timeout=%u pretimeout=%u already_active=%d status=0x%lx\n",
+		  wdd->timeout, wdd->pretimeout, watchdog_active(wdd), wdd->status);
+
 	ret = sprd_wdt_fiq_load_value(wdt, wdd->timeout, wdd->pretimeout);
 	if (ret)
 		return ret;
 
-	if (watchdog_active(wdd))
+	if (watchdog_active(wdd)) {
+		pr_notice(SPRD_WDT_FIQ_DIAG_TAG
+			  " kick-only path count=%u (~%us)\n",
+			  sprd_wdt_fiq_get_cnt_value(wdt),
+			  sprd_wdt_fiq_get_cnt_value(wdt) / SPRD_WDT_FIQ_CNT_STEP);
 		return 0;
+	}
 
 	sprd_wdt_fiq_unlock(wdt);
 	val = readl_relaxed(wdt->base + SPRD_WDT_FIQ_CTRL);
-	val |= SPRD_WDT_FIQ_CNT_EN_BIT | SPRD_WDT_FIQ_INT_EN_BIT | SPRD_WDT_FIQ_RST_EN_BIT;
+	val |= SPRD_WDT_FIQ_CNT_EN_BIT | SPRD_WDT_FIQ_INT_EN_BIT |
+		SPRD_WDT_FIQ_RST_EN_BIT;
 	writel_relaxed(val, wdt->base + SPRD_WDT_FIQ_CTRL);
 	set_bit(WDOG_HW_RUNNING, &wdd->status);
 	set_bit(WDOG_ACTIVE, &wdd->status);
 	sprd_wdt_fiq_lock(wdt);
 
-
+	pr_notice(SPRD_WDT_FIQ_DIAG_TAG
+		  " started ctrl=0x%08x raw=0x%08x count=%u status=0x%lx\n",
+		  readl_relaxed(wdt->base + SPRD_WDT_FIQ_CTRL),
+		  readl_relaxed(wdt->base + SPRD_WDT_FIQ_INT_RAW),
+		  sprd_wdt_fiq_get_cnt_value(wdt), wdd->status);
 	return 0;
 }
 
@@ -266,6 +306,12 @@ static int sprd_wdt_fiq_stop(struct watchdog_device *wdd)
 	struct sprd_wdt_fiq *wdt = to_sprd_wdt_fiq(wdd);
 	u32 val;
 
+	pr_notice(SPRD_WDT_FIQ_DIAG_TAG
+		  " stop ctrl=0x%08x raw=0x%08x count=%u status=0x%lx\n",
+		  readl_relaxed(wdt->base + SPRD_WDT_FIQ_CTRL),
+		  readl_relaxed(wdt->base + SPRD_WDT_FIQ_INT_RAW),
+		  sprd_wdt_fiq_get_cnt_value(wdt), wdd->status);
+
 	sprd_wdt_fiq_unlock(wdt);
 	val = readl_relaxed(wdt->base + SPRD_WDT_FIQ_CTRL);
 	val &= ~(SPRD_WDT_FIQ_CNT_EN_BIT | SPRD_WDT_FIQ_RST_EN_BIT |
@@ -273,7 +319,6 @@ static int sprd_wdt_fiq_stop(struct watchdog_device *wdd)
 	writel_relaxed(val, wdt->base + SPRD_WDT_FIQ_CTRL);
 	clear_bit(WDOG_ACTIVE, &wdd->status);
 	sprd_wdt_fiq_lock(wdt);
-
 
 	return 0;
 }
@@ -286,6 +331,8 @@ static int sprd_wdt_fiq_set_timeout(struct watchdog_device *wdd,
 	if (timeout == wdd->timeout)
 		return 0;
 
+	pr_notice(SPRD_WDT_FIQ_DIAG_TAG " set_timeout old=%u new=%u\n",
+		  wdd->timeout, timeout);
 	wdd->timeout = timeout;
 
 	return sprd_wdt_fiq_load_value(wdt, timeout, wdd->pretimeout);
@@ -299,6 +346,8 @@ static int sprd_wdt_fiq_set_pretimeout(struct watchdog_device *wdd,
 	if (new_pretimeout < wdd->min_timeout)
 		return -EINVAL;
 
+	pr_notice(SPRD_WDT_FIQ_DIAG_TAG " set_pretimeout old=%u new=%u\n",
+		  wdd->pretimeout, new_pretimeout);
 	wdd->pretimeout = new_pretimeout;
 
 	return sprd_wdt_fiq_load_value(wdt, wdd->timeout, new_pretimeout);
@@ -348,7 +397,7 @@ static const struct watchdog_info sprd_wdt_fiq_info = {
 
 static enum alarmtimer_restart sprd_wdt_sleep_callback(struct alarm *p,  ktime_t t)
 {
-	pr_err("sprd_wdt: sprd wdt sleep callback\n");
+	pr_err(SPRD_WDT_FIQ_DIAG_TAG " deep-sleep alarm callback fired\n");
 	return ALARMTIMER_NORESTART;
 }
 
@@ -358,13 +407,14 @@ static int sprd_wdt_fiq_probe(struct platform_device *pdev)
 	struct sprd_wdt_fiq *wdt;
 	int ret;
 
+	dev_notice(&pdev->dev, SPRD_WDT_FIQ_DIAG_TAG " probe begin\n");
 	wdt = devm_kzalloc(&pdev->dev, sizeof(*wdt), GFP_KERNEL);
 	if (!wdt)
 		return -ENOMEM;
 
 	wdt->data = of_device_get_match_data(&pdev->dev);
 	if (!wdt->data) {
-		dev_err(&pdev->dev, "can not get private data!\n");
+		dev_err(&pdev->dev, SPRD_WDT_FIQ_DIAG_TAG " can not get private data\n");
 		return -ENODEV;
 	}
 
@@ -374,19 +424,19 @@ static int sprd_wdt_fiq_probe(struct platform_device *pdev)
 	wdt_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	wdt->base = devm_ioremap_resource(&pdev->dev, wdt_res);
 	if (IS_ERR(wdt->base)) {
-		dev_err(&pdev->dev, "failed to map memory resource\n");
+		dev_err(&pdev->dev, SPRD_WDT_FIQ_DIAG_TAG " failed to map memory resource\n");
 		return PTR_ERR(wdt->base);
 	}
 
 	wdt->enable = devm_clk_get(&pdev->dev, "enable");
 	if (IS_ERR(wdt->enable)) {
-		dev_err(&pdev->dev, "can't get the enable clock\n");
+		dev_err(&pdev->dev, SPRD_WDT_FIQ_DIAG_TAG " can't get enable clock\n");
 		return PTR_ERR(wdt->enable);
 	}
 
 	wdt->rtc_enable = devm_clk_get(&pdev->dev, "rtc_enable");
 	if (IS_ERR(wdt->rtc_enable)) {
-		dev_err(&pdev->dev, "can't get the rtc enable clock\n");
+		dev_err(&pdev->dev, SPRD_WDT_FIQ_DIAG_TAG " can't get rtc_enable clock\n");
 		return PTR_ERR(wdt->rtc_enable);
 	}
 
@@ -398,15 +448,20 @@ static int sprd_wdt_fiq_probe(struct platform_device *pdev)
 	wdt->wdd.timeout = SPRD_WDT_FIQ_MAX_TIMEOUT;
 
 	wdt->sleep_en = sprd_dswdt_fiq_en();
+	dev_notice(&pdev->dev,
+		   SPRD_WDT_FIQ_DIAG_TAG
+		   " sleep_en=%d eb_always_on=%d timeout=%u\n",
+		   wdt->sleep_en, wdt->data->eb_always_on, wdt->wdd.timeout);
 	ret = sprd_wdt_fiq_enable(wdt);
 	if (ret) {
-		dev_err(&pdev->dev, "failed to enable wdt\n");
+		dev_err(&pdev->dev, SPRD_WDT_FIQ_DIAG_TAG " failed to enable wdt ret=%d\n", ret);
 		return ret;
 	}
 	ret = devm_add_action(&pdev->dev, sprd_wdt_fiq_disable, wdt);
 	if (ret) {
 		sprd_wdt_fiq_disable(wdt);
-		dev_err(&pdev->dev, "Failed to add wdt disable action\n");
+		dev_err(&pdev->dev,
+			SPRD_WDT_FIQ_DIAG_TAG " failed to add disable action ret=%d\n", ret);
 		return ret;
 	}
 
@@ -418,6 +473,12 @@ static int sprd_wdt_fiq_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, wdt);
+	dev_notice(&pdev->dev,
+		   SPRD_WDT_FIQ_DIAG_TAG
+		   " probe complete ctrl=0x%08x raw=0x%08x count=%u\n",
+		   readl_relaxed(wdt->base + SPRD_WDT_FIQ_CTRL),
+		   readl_relaxed(wdt->base + SPRD_WDT_FIQ_INT_RAW),
+		   sprd_wdt_fiq_get_cnt_value(wdt));
 
 	return 0;
 }
@@ -428,6 +489,8 @@ static int __maybe_unused sprd_wdt_fiq_pm_suspend(struct device *dev)
 	struct watchdog_device *wdd = dev_get_drvdata(dev);
 	struct sprd_wdt_fiq *wdt = dev_get_drvdata(dev);
 
+	dev_notice(dev, SPRD_WDT_FIQ_DIAG_TAG " pm_suspend active=%d\n",
+		   watchdog_active(wdd));
 	if (watchdog_active(wdd))
 		sprd_wdt_fiq_stop(&wdt->wdd);
 
@@ -444,6 +507,8 @@ static int __maybe_unused sprd_wdt_fiq_pm_resume(struct device *dev)
 	struct sprd_wdt_fiq *wdt = dev_get_drvdata(dev);
 	int ret;
 
+	dev_notice(dev, SPRD_WDT_FIQ_DIAG_TAG " pm_resume active=%d\n",
+		   watchdog_active(wdd));
 	ret = sprd_wdt_fiq_enable(wdt);
 	if (ret)
 		return ret;
@@ -465,9 +530,16 @@ static int sprd_wdt_fiq_syscore_suspend(void)
 	if (!wdt_fiq)
 		return -ENODEV;
 
+	pr_notice(SPRD_WDT_FIQ_DIAG_TAG
+		  " syscore_suspend sleep_en=%d active=%d ctrl=0x%08x count=%u\n",
+		  wdt_fiq->sleep_en, watchdog_active(&wdt_fiq->wdd),
+		  readl_relaxed(wdt_fiq->base + SPRD_WDT_FIQ_CTRL),
+		  sprd_wdt_fiq_get_cnt_value(wdt_fiq));
+
 	if (wdt_fiq->sleep_en) {
 		if (watchdog_active(&wdt_fiq->wdd)) {
-			sprd_wdt_fiq_load_value(wdt_fiq, SPRD_WDT_SLEEP_TIMEOUT, SPRD_WDT_SLEEP_PRETIMEOUT);
+			sprd_wdt_fiq_load_value(wdt_fiq, SPRD_WDT_SLEEP_TIMEOUT,
+					SPR D_WDT_SLEEP_PRETIMEOUT);
 		} else {
 			sprd_wdt_fiq_disable(wdt_fiq);
 		}
@@ -488,6 +560,12 @@ static void sprd_wdt_fiq_syscore_resume(void)
 
 	if (!wdt_fiq)
 		return;
+
+	pr_notice(SPRD_WDT_FIQ_DIAG_TAG
+		  " syscore_resume sleep_en=%d active=%d ctrl=0x%08x count=%u\n",
+		  wdt_fiq->sleep_en, watchdog_active(&wdt_fiq->wdd),
+		  readl_relaxed(wdt_fiq->base + SPRD_WDT_FIQ_CTRL),
+		  sprd_wdt_fiq_get_cnt_value(wdt_fiq));
 
 	if (wdt_fiq->sleep_en) {
 		if (!watchdog_active(&wdt_fiq->wdd)) {
