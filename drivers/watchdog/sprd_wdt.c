@@ -64,6 +64,7 @@
 #define SPRD_WDT_LOAD_TIMEOUT		2000
 #define SPRD_WDTEN_MAGIC "e551"
 #define SPRD_WDTEN_MAGIC_LEN_MAX  10
+#define SPRD_WDT_DIAG_TAG "[A3DBG][AP_WDT]"
 
 struct sprd_wdt {
 	void __iomem *base;
@@ -85,20 +86,25 @@ static bool sprd_wdt_en(void)
 	ret = of_property_read_string(cmdline_node, "bootargs", &cmd_line);
 
 	if (ret) {
-		pr_err("can't not parse bootargs property\n");
+		pr_err(SPRD_WDT_DIAG_TAG " can't parse bootargs ret=%d\n", ret);
 		return false;
 	}
 
 	wdten_name_p = strstr(cmd_line, "androidboot.wdten=");
 	if (!wdten_name_p) {
-		pr_err("can't find androidboot.wdten\n");
+		pr_err(SPRD_WDT_DIAG_TAG " androidboot.wdten is absent\n");
 		return false;
 	}
 
 	sscanf(wdten_name_p, "androidboot.wdten=%8s", wdten_value);
-	if (strncmp(wdten_value, SPRD_WDTEN_MAGIC, strlen(SPRD_WDTEN_MAGIC)))
+	pr_notice(SPRD_WDT_DIAG_TAG " parsed androidboot.wdten='%s'\n",
+		  wdten_value);
+	if (strncmp(wdten_value, SPRD_WDTEN_MAGIC, strlen(SPRD_WDTEN_MAGIC))) {
+		pr_notice(SPRD_WDT_DIAG_TAG " hardware reset output disabled\n");
 		return false;
+	}
 
+	pr_notice(SPRD_WDT_DIAG_TAG " hardware reset output enabled\n");
 	return true;
 }
 
@@ -117,17 +123,6 @@ static inline void sprd_wdt_unlock(void __iomem *addr)
 	writel_relaxed(SPRD_WDT_UNLOCK_KEY, addr + SPRD_WDT_LOCK);
 }
 
-static irqreturn_t sprd_wdt_isr(int irq, void *dev_id)
-{
-	struct sprd_wdt *wdt = (struct sprd_wdt *)dev_id;
-
-	sprd_wdt_unlock(wdt->base);
-	writel_relaxed(SPRD_WDT_INT_CLEAR_BIT, wdt->base + SPRD_WDT_INT_CLR);
-	sprd_wdt_lock(wdt->base);
-	watchdog_notify_pretimeout(&wdt->wdd);
-	return IRQ_HANDLED;
-}
-
 static u32 sprd_wdt_get_cnt_value(struct sprd_wdt *wdt)
 {
 	u32 val;
@@ -138,6 +133,24 @@ static u32 sprd_wdt_get_cnt_value(struct sprd_wdt *wdt)
 		SPRD_WDT_LOW_VALUE_MASK;
 
 	return val;
+}
+
+static irqreturn_t sprd_wdt_isr(int irq, void *dev_id)
+{
+	struct sprd_wdt *wdt = (struct sprd_wdt *)dev_id;
+	u32 ctrl = readl_relaxed(wdt->base + SPRD_WDT_CTRL);
+	u32 raw = readl_relaxed(wdt->base + SPRD_WDT_INT_RAW);
+	u32 cnt = sprd_wdt_get_cnt_value(wdt);
+
+	pr_emerg(SPRD_WDT_DIAG_TAG
+		 " PRETIMEOUT irq=%d ctrl=0x%08x raw=0x%08x count=%u (~%us) reset_en=%d\n",
+		 irq, ctrl, raw, cnt, cnt / SPRD_WDT_CNT_STEP, wdt->reset_en);
+
+	sprd_wdt_unlock(wdt->base);
+	writel_relaxed(SPRD_WDT_INT_CLEAR_BIT, wdt->base + SPRD_WDT_INT_CLR);
+	sprd_wdt_lock(wdt->base);
+	watchdog_notify_pretimeout(&wdt->wdd);
+	return IRQ_HANDLED;
 }
 
 static int sprd_wdt_load_value(struct sprd_wdt *wdt, u32 timeout,
@@ -159,8 +172,12 @@ static int sprd_wdt_load_value(struct sprd_wdt *wdt, u32 timeout,
 		cpu_relax();
 	} while (delay_cnt++ < SPRD_WDT_LOAD_TIMEOUT);
 
-	if (delay_cnt >= SPRD_WDT_LOAD_TIMEOUT)
+	if (delay_cnt >= SPRD_WDT_LOAD_TIMEOUT) {
+		pr_err(SPRD_WDT_DIAG_TAG
+		       " load busy timeout raw=0x%08x timeout=%u pretimeout=%u\n",
+		       val, timeout, pretimeout);
 		return -EBUSY;
+	}
 
 	sprd_wdt_unlock(wdt->base);
 	writel_relaxed((tmr_step >> SPRD_WDT_CNT_HIGH_SHIFT) &
@@ -174,6 +191,8 @@ static int sprd_wdt_load_value(struct sprd_wdt *wdt, u32 timeout,
 		       wdt->base + SPRD_WDT_IRQ_LOAD_LOW);
 	sprd_wdt_lock(wdt->base);
 
+	pr_notice(SPRD_WDT_DIAG_TAG " load timeout=%u pretimeout=%u\n",
+		  timeout, pretimeout);
 	return 0;
 }
 
@@ -196,12 +215,17 @@ static int sprd_wdt_enable(struct sprd_wdt *wdt)
 	val |= SPRD_WDT_NEW_VER_EN;
 	writel_relaxed(val, wdt->base + SPRD_WDT_CTRL);
 	sprd_wdt_lock(wdt->base);
+	pr_notice(SPRD_WDT_DIAG_TAG " clocks/controller enabled ctrl=0x%08x\n", val);
 	return 0;
 }
 
 static void sprd_wdt_disable(void *_data)
 {
 	struct sprd_wdt *wdt = _data;
+
+	pr_notice(SPRD_WDT_DIAG_TAG " controller disable requested ctrl=0x%08x raw=0x%08x\n",
+		  readl_relaxed(wdt->base + SPRD_WDT_CTRL),
+		  readl_relaxed(wdt->base + SPRD_WDT_INT_RAW));
 
 	sprd_wdt_unlock(wdt->base);
 	writel_relaxed(0x0, wdt->base + SPRD_WDT_CTRL);
@@ -216,6 +240,10 @@ static int sprd_wdt_start(struct watchdog_device *wdd)
 	struct sprd_wdt *wdt = to_sprd_wdt(wdd);
 	u32 val;
 	int ret;
+
+	pr_notice(SPRD_WDT_DIAG_TAG
+		  " start timeout=%u pretimeout=%u reset_en=%d status=0x%lx\n",
+		  wdd->timeout, wdd->pretimeout, wdt->reset_en, wdd->status);
 
 	ret = sprd_wdt_load_value(wdt, wdd->timeout, wdd->pretimeout);
 	if (ret)
@@ -232,6 +260,11 @@ static int sprd_wdt_start(struct watchdog_device *wdd)
 	sprd_wdt_lock(wdt->base);
 	set_bit(WDOG_HW_RUNNING, &wdd->status);
 
+	pr_notice(SPRD_WDT_DIAG_TAG
+		  " started ctrl=0x%08x raw=0x%08x count=%u reset_en=%d\n",
+		  readl_relaxed(wdt->base + SPRD_WDT_CTRL),
+		  readl_relaxed(wdt->base + SPRD_WDT_INT_RAW),
+		  sprd_wdt_get_cnt_value(wdt), wdt->reset_en);
 	return 0;
 }
 
@@ -239,6 +272,12 @@ static int sprd_wdt_stop(struct watchdog_device *wdd)
 {
 	struct sprd_wdt *wdt = to_sprd_wdt(wdd);
 	u32 val;
+
+	pr_notice(SPRD_WDT_DIAG_TAG
+		  " stop ctrl=0x%08x raw=0x%08x count=%u\n",
+		  readl_relaxed(wdt->base + SPRD_WDT_CTRL),
+		  readl_relaxed(wdt->base + SPRD_WDT_INT_RAW),
+		  sprd_wdt_get_cnt_value(wdt));
 
 	sprd_wdt_unlock(wdt->base);
 	val = readl_relaxed(wdt->base + SPRD_WDT_CTRL);
@@ -257,6 +296,8 @@ static int sprd_wdt_set_timeout(struct watchdog_device *wdd,
 	if (timeout == wdd->timeout)
 		return 0;
 
+	pr_notice(SPRD_WDT_DIAG_TAG " set_timeout old=%u new=%u\n",
+		  wdd->timeout, timeout);
 	wdd->timeout = timeout;
 
 	return sprd_wdt_load_value(wdt, timeout, wdd->pretimeout);
@@ -270,6 +311,8 @@ static int sprd_wdt_set_pretimeout(struct watchdog_device *wdd,
 	if (new_pretimeout < wdd->min_timeout)
 		return -EINVAL;
 
+	pr_notice(SPRD_WDT_DIAG_TAG " set_pretimeout old=%u new=%u\n",
+		  wdd->pretimeout, new_pretimeout);
 	wdd->pretimeout = new_pretimeout;
 
 	return sprd_wdt_load_value(wdt, wdd->timeout, new_pretimeout);
@@ -309,6 +352,7 @@ static int sprd_wdt_probe(struct platform_device *pdev)
 	struct sprd_wdt *wdt;
 	int ret;
 
+	dev_notice(&pdev->dev, SPRD_WDT_DIAG_TAG " probe begin\n");
 	wdt = devm_kzalloc(&pdev->dev, sizeof(*wdt), GFP_KERNEL);
 	if (!wdt)
 		return -ENOMEM;
@@ -316,32 +360,32 @@ static int sprd_wdt_probe(struct platform_device *pdev)
 	wdt_res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	wdt->base = devm_ioremap_resource(&pdev->dev, wdt_res);
 	if (IS_ERR(wdt->base)) {
-		dev_err(&pdev->dev, "failed to map memory resource\n");
+		dev_err(&pdev->dev, SPRD_WDT_DIAG_TAG " failed to map memory resource\n");
 		return PTR_ERR(wdt->base);
 	}
 
 	wdt->enable = devm_clk_get(&pdev->dev, "enable");
 	if (IS_ERR(wdt->enable)) {
-		dev_err(&pdev->dev, "can't get the enable clock\n");
+		dev_err(&pdev->dev, SPRD_WDT_DIAG_TAG " can't get enable clock\n");
 		return PTR_ERR(wdt->enable);
 	}
 
 	wdt->rtc_enable = devm_clk_get(&pdev->dev, "rtc_enable");
 	if (IS_ERR(wdt->rtc_enable)) {
-		dev_err(&pdev->dev, "can't get the rtc enable clock\n");
+		dev_err(&pdev->dev, SPRD_WDT_DIAG_TAG " can't get rtc_enable clock\n");
 		return PTR_ERR(wdt->rtc_enable);
 	}
 
 	wdt->irq = platform_get_irq(pdev, 0);
 	if (wdt->irq < 0) {
-		dev_err(&pdev->dev, "failed to get IRQ resource\n");
+		dev_err(&pdev->dev, SPRD_WDT_DIAG_TAG " failed to get IRQ resource\n");
 		return wdt->irq;
 	}
 
 	ret = devm_request_irq(&pdev->dev, wdt->irq, sprd_wdt_isr,
 			       IRQF_NO_SUSPEND, "sprd-wdt", (void *)wdt);
 	if (ret) {
-		dev_err(&pdev->dev, "failed to register irq\n");
+		dev_err(&pdev->dev, SPRD_WDT_DIAG_TAG " failed to register irq ret=%d\n", ret);
 		return ret;
 	}
 
@@ -353,15 +397,18 @@ static int sprd_wdt_probe(struct platform_device *pdev)
 	wdt->wdd.timeout = SPRD_WDT_MAX_TIMEOUT;
 
 	wdt->reset_en = sprd_wdt_en();
+	dev_notice(&pdev->dev,
+		   SPRD_WDT_DIAG_TAG " irq=%d reset_en=%d default_timeout=%u\n",
+		   wdt->irq, wdt->reset_en, wdt->wdd.timeout);
 	ret = sprd_wdt_enable(wdt);
 	if (ret) {
-		dev_err(&pdev->dev, "failed to enable wdt\n");
+		dev_err(&pdev->dev, SPRD_WDT_DIAG_TAG " failed to enable wdt ret=%d\n", ret);
 		return ret;
 	}
 	ret = devm_add_action(&pdev->dev, sprd_wdt_disable, wdt);
 	if (ret) {
 		sprd_wdt_disable(wdt);
-		dev_err(&pdev->dev, "Failed to add wdt disable action\n");
+		dev_err(&pdev->dev, SPRD_WDT_DIAG_TAG " failed to add disable action ret=%d\n", ret);
 		return ret;
 	}
 
@@ -371,10 +418,13 @@ static int sprd_wdt_probe(struct platform_device *pdev)
 	ret = devm_watchdog_register_device(&pdev->dev, &wdt->wdd);
 	if (ret) {
 		sprd_wdt_disable(wdt);
-		dev_err(&pdev->dev, "failed to register watchdog\n");
+		dev_err(&pdev->dev, SPRD_WDT_DIAG_TAG " failed to register watchdog ret=%d\n", ret);
 		return ret;
 	}
 	platform_set_drvdata(pdev, wdt);
+	dev_notice(&pdev->dev,
+		   SPRD_WDT_DIAG_TAG " probe complete timeout=%u pretimeout=%u status=0x%lx\n",
+		   wdt->wdd.timeout, wdt->wdd.pretimeout, wdt->wdd.status);
 
 	return 0;
 }
@@ -383,6 +433,8 @@ static int __maybe_unused sprd_wdt_pm_suspend(struct device *dev)
 {
 	struct sprd_wdt *wdt = dev_get_drvdata(dev);
 
+	dev_notice(dev, SPRD_WDT_DIAG_TAG " suspend active=%d\n",
+		   watchdog_active(&wdt->wdd));
 	if (watchdog_active(&wdt->wdd))
 		sprd_wdt_stop(&wdt->wdd);
 	sprd_wdt_disable(wdt);
@@ -395,6 +447,8 @@ static int __maybe_unused sprd_wdt_pm_resume(struct device *dev)
 	struct sprd_wdt *wdt = dev_get_drvdata(dev);
 	int ret;
 
+	dev_notice(dev, SPRD_WDT_DIAG_TAG " resume active=%d\n",
+		   watchdog_active(&wdt->wdd));
 	ret = sprd_wdt_enable(wdt);
 	if (ret)
 		return ret;
