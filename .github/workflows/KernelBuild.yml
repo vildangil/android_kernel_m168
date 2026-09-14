@@ -1,10 +1,6 @@
 name: Build Kernel
 
 on:
-  # Temporary CI trigger used while validating this workflow branch.
-  push:
-    branches:
-      - chatgpt/resukisu-build
   workflow_dispatch:
     inputs:
       defconfig:
@@ -30,7 +26,7 @@ on:
         type: boolean
         default: false
       isFlashableZip:
-        description: 'Generate AnyKernel3 flashable artifact'
+        description: 'Generate AnyKernel3 flashable zip'
         required: true
         type: boolean
         default: true
@@ -57,14 +53,6 @@ jobs:
         run: |
           ROOT_SOLUTION="${{ inputs.rootSolution }}"
           DEFCONFIG="${{ inputs.defconfig }}"
-
-          # push is only used for CI validation of this branch.
-          if [ -z "$ROOT_SOLUTION" ]; then
-            ROOT_SOLUTION="ReSukiSU"
-          fi
-          if [ -z "$DEFCONFIG" ]; then
-            DEFCONFIG="a3core_eur_open_defconfig"
-          fi
 
           echo "ROOT_SOLUTION=$ROOT_SOLUTION" >> "$GITHUB_ENV"
           echo "DEFCONFIG=$DEFCONFIG" >> "$GITHUB_ENV"
@@ -98,15 +86,14 @@ jobs:
         run: |
           set -euxo pipefail
 
-          # The source tree already contains an embedded KernelSU snapshot.
-          # Replace only the KernelSU source/symlink for this build, while
-          # preserving the device-specific manual hooks already in the kernel.
+          # Replace the embedded KernelSU snapshot only for this build.
+          # Device-specific manual hooks in the kernel tree are preserved.
           rm -rf KernelSU KernelSU-Next
           rm -f drivers/kernelsu
 
           case "$ROOT_SOLUTION" in
             KernelSU-Next)
-              # 4.14 is a legacy/non-GKI kernel, so use KernelSU-Next legacy.
+              # Linux 4.14 is legacy/non-GKI, so use the legacy branch.
               curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/legacy/kernel/setup.sh" | bash -s legacy
               ;;
             ReSukiSU)
@@ -122,7 +109,7 @@ jobs:
           test -f drivers/kernelsu/Kconfig
 
       - name: Disable CM4 watchdog for diagnostic build
-        if: ${{ github.event_name == 'push' || inputs.disableCm4Watchdog == true }}
+        if: ${{ inputs.disableCm4Watchdog == true }}
         shell: bash
         run: |
           python3 - <<'PY'
@@ -147,7 +134,7 @@ jobs:
           chmod +x scripts/config
           scripts/config --file out/.config -e KSU
 
-          # Linux 4.14 must use manual hooks for both supported implementations.
+          # Both implementations need manual hooks on this Linux 4.14 non-GKI tree.
           scripts/config --file out/.config -e KSU_MANUAL_HOOK
 
           if [ "$ROOT_SOLUTION" = "ReSukiSU" ]; then
@@ -189,7 +176,7 @@ jobs:
           ls -lh "$KERNEL_ROOT/out/arch/arm64/boot/Image"
 
       - name: Build AnyKernel3 Flashable Zip
-        if: ${{ github.event_name == 'push' || inputs.isFlashableZip == true }}
+        if: ${{ inputs.isFlashableZip == true }}
         shell: bash
         run: |
           git clone --depth 1 https://github.com/osm0sis/AnyKernel3.git AK3
@@ -216,7 +203,7 @@ jobs:
           retention-days: 7
 
       - name: Upload AnyKernel3 Zip
-        if: ${{ github.event_name == 'push' || inputs.isFlashableZip == true }}
+        if: ${{ inputs.isFlashableZip == true }}
         uses: actions/upload-artifact@v4
         with:
           name: AnyKernel3-${{ env.ROOT_SOLUTION }}
