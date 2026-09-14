@@ -7,6 +7,14 @@ on:
         description: 'Kernel defconfig name'
         required: true
         default: 'a3core_eur_open_defconfig'
+      filesystem:
+        description: 'Filesystem support variant'
+        required: true
+        type: choice
+        options:
+          - EROFS
+          - EXT4
+        default: EROFS
       rootSolution:
         description: 'Kernel root implementation'
         required: true
@@ -52,11 +60,14 @@ jobs:
         shell: bash
         run: |
           ROOT_SOLUTION="${{ inputs.rootSolution }}"
+          FILESYSTEM="${{ inputs.filesystem }}"
           DEFCONFIG="${{ inputs.defconfig }}"
 
           echo "ROOT_SOLUTION=$ROOT_SOLUTION" >> "$GITHUB_ENV"
+          echo "FILESYSTEM=$FILESYSTEM" >> "$GITHUB_ENV"
           echo "DEFCONFIG=$DEFCONFIG" >> "$GITHUB_ENV"
           echo "Root solution: $ROOT_SOLUTION"
+          echo "Filesystem: $FILESYSTEM"
           echo "Defconfig: $DEFCONFIG"
 
       - name: Install dependencies
@@ -132,9 +143,9 @@ jobs:
           make -C "$KERNEL_ROOT" O="$KERNEL_ROOT/out" ARCH="$ARCH" "$DEFCONFIG"
 
           chmod +x scripts/config
-          scripts/config --file out/.config -e KSU
 
-          # Both implementations need manual hooks on this Linux 4.14 non-GKI tree.
+          # Root solution
+          scripts/config --file out/.config -e KSU
           scripts/config --file out/.config -e KSU_MANUAL_HOOK
 
           if [ "$ROOT_SOLUTION" = "ReSukiSU" ]; then
@@ -144,8 +155,44 @@ jobs:
             scripts/config --file out/.config -d KSU_KPROBES_HOOK || true
           fi
 
+          # Filesystem variant. EXT4 is already supported by this kernel tree;
+          # the EXT4 variant simply removes EROFS support from the final config.
+          case "$FILESYSTEM" in
+            EROFS)
+              scripts/config --file out/.config -e EROFS_FS
+              scripts/config --file out/.config -e EROFS_FS_XATTR
+              scripts/config --file out/.config -e EROFS_FS_POSIX_ACL
+              scripts/config --file out/.config -e EROFS_FS_SECURITY
+              scripts/config --file out/.config -e EROFS_FS_ZIP
+              scripts/config --file out/.config -e EROFS_FS_ARMV8_ACCELERATED_LZ4
+              scripts/config --file out/.config --set-val EROFS_FS_CLUSTER_PAGE_LIMIT 1
+              ;;
+            EXT4)
+              scripts/config --file out/.config -e EXT4_FS
+              scripts/config --file out/.config -e EXT4_FS_POSIX_ACL
+              scripts/config --file out/.config -e EXT4_FS_SECURITY
+              scripts/config --file out/.config -e EXT4_ENCRYPTION
+              scripts/config --file out/.config -e EXT4_FS_ENCRYPTION
+
+              scripts/config --file out/.config -d EROFS_FS
+              scripts/config --file out/.config -d EROFS_FS_XATTR || true
+              scripts/config --file out/.config -d EROFS_FS_POSIX_ACL || true
+              scripts/config --file out/.config -d EROFS_FS_SECURITY || true
+              scripts/config --file out/.config -d EROFS_FS_ZIP || true
+              scripts/config --file out/.config -d EROFS_FS_ARMV8_ACCELERATED_LZ4 || true
+              ;;
+            *)
+              echo "Unsupported filesystem: $FILESYSTEM" >&2
+              exit 2
+              ;;
+          esac
+
           make -C "$KERNEL_ROOT" O="$KERNEL_ROOT/out" ARCH="$ARCH" olddefconfig
+
+          echo "===== KernelSU config ====="
           grep -E '^CONFIG_KSU|^# CONFIG_KSU' out/.config || true
+          echo "===== Filesystem config ====="
+          grep -E '^CONFIG_(EROFS|EXT4)|^# CONFIG_(EROFS|EXT4)' out/.config || true
 
       - name: Patch permissive
         if: ${{ inputs.isPermissive == true }}
@@ -184,19 +231,19 @@ jobs:
 
           cd AK3
           sed -i 's/do.devicecheck=1/do.devicecheck=0/g' anykernel.sh
-          sed -i "s/kernel.string=.*/kernel.string=A032F-erofs-${ROOT_SOLUTION} by VildanG/g" anykernel.sh
+          sed -i "s/kernel.string=.*/kernel.string=A032F-${FILESYSTEM}-${ROOT_SOLUTION} by VildanG/g" anykernel.sh
           sed -i 's|BLOCK=.*|BLOCK=auto;|g' anykernel.sh
           sed -i 's/IS_SLOT_DEVICE=.*/IS_SLOT_DEVICE=0;/g' anykernel.sh
           sed -i '/# init.rc/,/append_file fstab.tuna.*/d' anykernel.sh
 
-          zip -r9 "../A032F-erofs-${ROOT_SOLUTION}.zip" . -x '.git/*' '.github/*'
+          zip -r9 "../A032F-${FILESYSTEM}-${ROOT_SOLUTION}.zip" . -x '.git/*' '.github/*'
           cd ..
-          ls -lh "A032F-erofs-${ROOT_SOLUTION}.zip"
+          ls -lh "A032F-${FILESYSTEM}-${ROOT_SOLUTION}.zip"
 
       - name: Upload Kernel Image
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-image-${{ env.ROOT_SOLUTION }}
+          name: kernel-image-${{ env.FILESYSTEM }}-${{ env.ROOT_SOLUTION }}
           path: |
             ${{ github.workspace }}/out/arch/arm64/boot/Image
             ${{ github.workspace }}/out/.config
@@ -206,6 +253,6 @@ jobs:
         if: ${{ inputs.isFlashableZip == true }}
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel3-${{ env.ROOT_SOLUTION }}
-          path: ${{ github.workspace }}/A032F-erofs-${{ env.ROOT_SOLUTION }}.zip
+          name: AnyKernel3-${{ env.FILESYSTEM }}-${{ env.ROOT_SOLUTION }}
+          path: ${{ github.workspace }}/A032F-${{ env.FILESYSTEM }}-${{ env.ROOT_SOLUTION }}.zip
           retention-days: 7
