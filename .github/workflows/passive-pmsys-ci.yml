@@ -1,4 +1,4 @@
-name: Passive PM_SYS Watchdog Compile Check
+name: Passive PM_SYS EROFS + EXT4 Build
 
 on:
   push:
@@ -8,32 +8,130 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        filesystem: [EROFS, EXT4]
     env:
       ARCH: arm64
       CROSS_COMPILE: ${{ github.workspace }}/toolchains/gcc-14.3/bin/aarch64-none-linux-gnu-
       CROSS_COMPILE_ARM32: ${{ github.workspace }}/toolchains/gcc-14.3/bin/arm-none-linux-gnueabihf-
       CC: clang
+      ROOT_SOLUTION: ReSukiSU
+      FILESYSTEM: ${{ matrix.filesystem }}
+
     steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y make gcc g++ python3 bc libncurses-dev flex bison ccache libssl-dev libelf-dev libyaml-dev wget tar xz-utils
-      - name: Toolchains
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y make gcc g++ python3 bc libncurses-dev flex bison ccache libssl-dev libelf-dev libyaml-dev wget tar xz-utils zip unzip curl
+
+      - name: Setup toolchains
         run: |
           mkdir -p toolchains/gcc-14.3 toolchains/clang-r383902b
           wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/0e9e7035bf8ad42437c6156e5950eab13655b26c/clang-r383902b.tar.gz -O clang.tar.gz
           tar -xf clang.tar.gz -C toolchains/clang-r383902b
+          rm clang.tar.gz
           wget -q https://developer.arm.com/-/media/Files/downloads/gnu/14.3.rel1/binrel/arm-gnu-toolchain-14.3.rel1-x86_64-aarch64-none-linux-gnu.tar.xz -O gcc.tar.xz
           tar -xf gcc.tar.xz -C toolchains/gcc-14.3 --strip-components=1
+          rm gcc.tar.xz
           echo "${{ github.workspace }}/toolchains/clang-r383902b/bin" >> "$GITHUB_PATH"
           echo "${{ github.workspace }}/toolchains/gcc-14.3/bin" >> "$GITHUB_PATH"
-      - name: Compile PM_SYS watchdog object
+
+      - name: Integrate ReSukiSU
         run: |
+          set -euxo pipefail
+          rm -rf KernelSU KernelSU-Next
+          rm -f drivers/kernelsu
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+          readlink -f drivers/kernelsu
+          test -f drivers/kernelsu/Kconfig
+
+      - name: Keep CM4 watchdog diagnostic-off behavior
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('drivers/watchdog/sprd_pmic_wdt.c')
+          text = path.read_text()
+          start = text.find('static bool sprd_pimc_wdt_en(void)')
+          end = text.find('static const struct of_device_id', start)
+          if start < 0 or end < 0:
+              raise SystemExit('Could not locate sprd_pimc_wdt_en()')
+          block = text[start:end]
+          old = '\treturn true;'
+          new = '\treturn false; /* diagnostic: disable PM_SYS/CM4 watchdog */'
+          if old not in block:
+              raise SystemExit('Expected final return true not found')
+          block = block.replace(old, new, 1)
+          path.write_text(text[:start] + block + text[end:])
+          PY
+
+      - name: Configure ${{ matrix.filesystem }}
+        run: |
+          set -euxo pipefail
           make O=out ARCH=arm64 a3core_eur_open_defconfig
+          chmod +x scripts/config
+
+          scripts/config --file out/.config -e KSU
+          scripts/config --file out/.config -e KSU_MANUAL_HOOK
+          scripts/config --file out/.config -d KSU_TRACEPOINT_HOOK || true
+          scripts/config --file out/.config -d KSU_SUSFS || true
+
+          if [ "$FILESYSTEM" = "EROFS" ]; then
+            scripts/config --file out/.config -e EXT4_FS
+            scripts/config --file out/.config -e EXT4_FS_POSIX_ACL
+            scripts/config --file out/.config -e EXT4_FS_SECURITY
+            scripts/config --file out/.config -e EXT4_ENCRYPTION
+            scripts/config --file out/.config -e EXT4_FS_ENCRYPTION
+            scripts/config --file out/.config -e EROFS_FS
+            scripts/config --file out/.config -e EROFS_FS_XATTR
+            scripts/config --file out/.config -e EROFS_FS_POSIX_ACL
+            scripts/config --file out/.config -e EROFS_FS_SECURITY
+            scripts/config --file out/.config -e EROFS_FS_ZIP
+            scripts/config --file out/.config -e EROFS_FS_ARMV8_ACCELERATED_LZ4
+            scripts/config --file out/.config --set-val EROFS_FS_CLUSTER_PAGE_LIMIT 1
+          else
+            scripts/config --file out/.config -e EXT4_FS
+            scripts/config --file out/.config -e EXT4_FS_POSIX_ACL
+            scripts/config --file out/.config -e EXT4_FS_SECURITY
+            scripts/config --file out/.config -e EXT4_ENCRYPTION
+            scripts/config --file out/.config -e EXT4_FS_ENCRYPTION
+            scripts/config --file out/.config -d EROFS_FS
+            scripts/config --file out/.config -d EROFS_FS_XATTR || true
+            scripts/config --file out/.config -d EROFS_FS_POSIX_ACL || true
+            scripts/config --file out/.config -d EROFS_FS_SECURITY || true
+            scripts/config --file out/.config -d EROFS_FS_ZIP || true
+            scripts/config --file out/.config -d EROFS_FS_ARMV8_ACCELERATED_LZ4 || true
+          fi
+
+          make O=out ARCH=arm64 olddefconfig
+          grep -E '^CONFIG_(EROFS|EXT4)|^# CONFIG_(EROFS|EXT4)|^CONFIG_KSU|^# CONFIG_KSU' out/.config || true
+
+      - name: Build Image
+        run: |
+          set -euxo pipefail
+          export KBUILD_BUILD_HOST="$(. /etc/os-release && echo ${NAME}-${VERSION_ID})"
+          export KBUILD_BUILD_TIMESTAMP="$(date -u -R)"
+          sed -i '/yamltree.o/d' scripts/dtc/Makefile
+          sed -i '/dt_to_yaml/d' scripts/dtc/dtc.c
           set -o pipefail
-          make O=out -j"$(nproc)" ARCH="$ARCH" CC="$CC" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
-            drivers/watchdog/sprd_pmic_wdt.o 2>&1 | tee passive-pmsys-build.log
-      - if: always()
+          make O=out -j"$(nproc)" ARCH="$ARCH" CC="$CC" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" Image 2>&1 | tee "passive-${FILESYSTEM}.log"
+          test -s out/arch/arm64/boot/Image
+          cp out/.config "config-${FILESYSTEM}"
+          sha256sum out/arch/arm64/boot/Image
+
+      - name: Upload ${{ matrix.filesystem }} Image
         uses: actions/upload-artifact@v4
         with:
-          name: passive-pmsys-build-log
-          path: passive-pmsys-build.log
-          if-no-files-found: warn
+          name: passive-pmsys-${{ matrix.filesystem }}
+          path: |
+            out/arch/arm64/boot/Image
+            config-${{ matrix.filesystem }}
+            passive-${{ matrix.filesystem }}.log
+          if-no-files-found: error
+          retention-days: 7
