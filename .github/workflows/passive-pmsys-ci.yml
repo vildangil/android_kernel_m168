@@ -1,0 +1,39 @@
+name: Passive PM_SYS Watchdog Compile Check
+
+on:
+  push:
+    branches:
+      - chatgpt/passive-pmsys-wdt
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      ARCH: arm64
+      CROSS_COMPILE: ${{ github.workspace }}/toolchains/gcc-14.3/bin/aarch64-none-linux-gnu-
+      CROSS_COMPILE_ARM32: ${{ github.workspace }}/toolchains/gcc-14.3/bin/arm-none-linux-gnueabihf-
+      CC: clang
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y make gcc g++ python3 bc libncurses-dev flex bison ccache libssl-dev libelf-dev libyaml-dev wget tar xz-utils
+      - name: Toolchains
+        run: |
+          mkdir -p toolchains/gcc-14.3 toolchains/clang-r383902b
+          wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/0e9e7035bf8ad42437c6156e5950eab13655b26c/clang-r383902b.tar.gz -O clang.tar.gz
+          tar -xf clang.tar.gz -C toolchains/clang-r383902b
+          wget -q https://developer.arm.com/-/media/Files/downloads/gnu/14.3.rel1/binrel/arm-gnu-toolchain-14.3.rel1-x86_64-aarch64-none-linux-gnu.tar.xz -O gcc.tar.xz
+          tar -xf gcc.tar.xz -C toolchains/gcc-14.3 --strip-components=1
+          echo "${{ github.workspace }}/toolchains/clang-r383902b/bin" >> "$GITHUB_PATH"
+          echo "${{ github.workspace }}/toolchains/gcc-14.3/bin" >> "$GITHUB_PATH"
+      - name: Compile PM_SYS watchdog object
+        run: |
+          make O=out ARCH=arm64 a3core_eur_open_defconfig
+          set -o pipefail
+          make O=out -j"$(nproc)" ARCH="$ARCH" CC="$CC" CROSS_COMPILE="$CROSS_COMPILE" CROSS_COMPILE_ARM32="$CROSS_COMPILE_ARM32" \
+            drivers/watchdog/sprd_pmic_wdt.o 2>&1 | tee passive-pmsys-build.log
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: passive-pmsys-build-log
+          path: passive-pmsys-build.log
+          if-no-files-found: warn
