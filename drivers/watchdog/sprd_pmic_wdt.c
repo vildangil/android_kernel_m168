@@ -103,10 +103,16 @@ static int sprd_pmic_wdt_enable(struct sprd_pmic_wdt *wdt, bool en)
 		p_cmd = "watchdog rstoff";
 
 	len = strlen(p_cmd) + 1;
+	dev_info(wdt->dev,
+		 "A3DBG PM_SYS: sbuf_write cmd='%s' len=%d timeout=%dms\n",
+		 p_cmd, len, timeout);
 	nwrite =
 		sbuf_write(SIPC_ID_PM_SYS, SMSG_CH_TTY, 0,
 			   p_cmd, len,
 			   msecs_to_jiffies(timeout));
+	dev_info(wdt->dev,
+		 "A3DBG PM_SYS: sbuf_write cmd='%s' returned %d (expected %d)\n",
+		 p_cmd, nwrite, len);
 
 	if (nwrite != len)
 		return -ENODEV;
@@ -117,6 +123,10 @@ static int sprd_pmic_wdt_enable(struct sprd_pmic_wdt *wdt, bool en)
 static void sprd_pimc_wdt_init(int event, void *data)
 {
 	struct sprd_pmic_wdt *pmic_wdt = data;
+
+	dev_info(pmic_wdt->dev,
+		 "A3DBG PM_SYS: notifier event=%d flag=%u wdten=%d\n",
+		 event, pmic_wdt->wdt_flag, pmic_wdt->wdten);
 
 	switch (event) {
 	case SBUF_NOTIFY_READY:
@@ -144,7 +154,9 @@ static void sprd_pimc_wdt_work(struct kthread_work *work)
 						 struct sprd_pmic_wdt,
 						 wdt_kwork);
 
-	dev_info(pmic_wdt->dev, "sprd pimc wdt work enter!\n");
+	dev_info(pmic_wdt->dev,
+		 "A3DBG PM_SYS: worker enter wdten=%d flag=%u\n",
+		 pmic_wdt->wdten, pmic_wdt->wdt_flag);
 
 	if (sprd_pmic_wdt_enable(pmic_wdt, pmic_wdt->wdten))
 		dev_err(pmic_wdt->dev, "failed to set pmic wdt %d!\n", pmic_wdt->wdten);
@@ -172,9 +184,14 @@ static bool sprd_pimc_wdt_en(void)
 	}
 
 	sscanf(wdten_name_p, "androidboot.wdten=%8s", wdten_value);
-	if (strncmp(wdten_value, SPRD_PMIC_WDTEN_MAGIC, strlen(SPRD_PMIC_WDTEN_MAGIC)))
+	if (strncmp(wdten_value, SPRD_PMIC_WDTEN_MAGIC, strlen(SPRD_PMIC_WDTEN_MAGIC))) {
+		pr_info("A3DBG PM_SYS: androidboot.wdten='%s' -> disabled\n",
+			wdten_value);
 		return false;
+	}
 
+	pr_info("A3DBG PM_SYS: androidboot.wdten='%s' -> enabled\n",
+		wdten_value);
 	return true;
 }
 
@@ -228,8 +245,13 @@ static int sprd_pmic_wdt_probe(struct platform_device *pdev)
 
 	pmic_wdt->wdten = sprd_pimc_wdt_en();
 	pmic_wdt->dev = &pdev->dev;
+	dev_info(&pdev->dev,
+		 "A3DBG PM_SYS: probe wdten=%d, registering notifier\n",
+		 pmic_wdt->wdten);
 	rval = sbuf_register_notifier(SIPC_ID_PM_SYS, SMSG_CH_TTY, 0,
 				      sprd_pimc_wdt_init, pmic_wdt);
+	dev_info(&pdev->dev,
+		 "A3DBG PM_SYS: sbuf_register_notifier returned %d\n", rval);
 	if (rval) {
 		dev_err(&pdev->dev, "sbuf notifier failed rval = %d\n", rval);
 		return EPROBE_DEFER; //depends on SPRD_SIPC_SPIPE for SP9863-GO
